@@ -62,26 +62,30 @@ def capture(data, first, last):
       return
 
 def get_product_id(response):
-    response_data = response.json()
-
-    products_data = response_data["products"]
-    products = {}
-    for product in products_data:
-        variants = product["variants"]
-        variant = variants[0]
-        product_id = variant["id"]
-        available = variant["available"]
-        price = float(variant["price"])
-        if price < 0.1:
-            continue
-        if available:
-            products[product_id] = price
-    if products:
-        min_price_product_id = min(products, key=products.get)
-        price = products[min_price_product_id]
-        return min_price_product_id,price
-
-    return None
+    try:
+        response_data = response.json()
+        products_data = response_data.get("products", [])
+        products = {}
+        for product in products_data:
+            variants = product.get("variants", [])
+            for variant in variants:
+                product_id = variant.get("id")
+                available = variant.get("available", False)
+                try:
+                    price = float(variant.get("price", "0"))
+                except:
+                    continue
+                if price < 0.1:
+                    continue
+                if available and product_id:
+                    products[product_id] = price
+        if products:
+            min_price_product_id = min(products, key=products.get)
+            price = products[min_price_product_id]
+            return min_price_product_id, price
+    except:
+        pass
+    return None, None
     
 async def autoshopify(url, card, session):
 
@@ -91,10 +95,38 @@ async def autoshopify(url, card, session):
     }
     start = time.time()
     try:
-        domain = url.split("//")[1]
-        cc,mes,ano,cvv = map(str.strip,card.split("|"))
-        request = await session.get(f"{url}/products.json")
-        product_id,price = get_product_id(request)
+        # Fix URL format
+        if not url.startswith('http'):
+            url = f'https://{url}'
+        url = url.rstrip('/')
+        
+        # Parse domain
+        try:
+            domain = url.split("//")[1].split("/")[0]
+        except:
+            domain = url.replace("https://", "").replace("http://", "").split("/")[0]
+        
+        # Parse card
+        parts = card.replace(" ", "").split("|")
+        if len(parts) != 4:
+            output.update({"Response": "INVALID CARD FORMAT", "Status": False})
+            print(json.dumps(output))
+            return output
+        cc, mes, ano, cvv = map(str.strip, parts)
+        
+        # Fix year format
+        if len(ano) == 2:
+            ano = '20' + ano
+            
+        # Get products
+        try:
+            request = await session.get(f"{url}/products.json", timeout=15)
+            product_id, price = get_product_id(request)
+        except Exception as e:
+            output.update({"Response": f"SITE ERROR: {str(e)}", "Status": False})
+            print(json.dumps(output))
+            return output
+            
         if not product_id:
             output.update({
                 "Response": "PRODUCT EMPTY",
@@ -104,16 +136,18 @@ async def autoshopify(url, card, session):
             return output
 
         try:
-            request = await session.get(url)
-        except:
+            request = await session.get(url, timeout=15)
+        except Exception as e:
             output.update({
-                "Response": "SITE DEAD",
+                "Response": f"SITE DEAD: {str(e)}",
                 "Status": False,
             })
             print(json.dumps(output))
             return output
 
         site_key = capture(request.text,'"accessToken":"','"')
+        if not site_key:
+            site_key = capture(request.text,'accessToken":"','"')
         # print(f"{product_id}\n{price}\n{site_key}")
 
         headers = {
