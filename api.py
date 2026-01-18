@@ -846,7 +846,7 @@ class ShopifyChecker:
                 receipt_id = resp_json['data']['submitForCompletion']['receipt']['id']
                 print(f"[+] Receipt ID: {receipt_id}")
             except Exception as e:
-                print(f"[DEBUG] Submit response: {text[:2000]}")
+                # print(f"[DEBUG] Submit response: {text[:2000]}")
                 
                 if 'CAPTCHA_METADATA_MISSING' in text:
                     return False, "Captcha required - Use better proxies", {}
