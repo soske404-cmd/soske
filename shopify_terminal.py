@@ -425,18 +425,21 @@ async def autoshopify(url, card, session):
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         }
         
+        # Format card number with spaces (required by Shopify)
+        formatted_card = " ".join([cc[i:i+4] for i in range(0, len(cc), 4)])
+        
         vault_json = {
             'credit_card': {
-                'number': cc,
+                'number': formatted_card,
                 'name': f'{firstName} {lastName}',
-                'month': int(mes),
-                'year': int(ano),
+                'month': mes,
+                'year': ano,
                 'verification_value': cvv,
             },
             'payment_session_scope': domain,
         }
         
-        resp = await session.post('https://deposit.us.shopifycs.com/sessions', json=vault_json, headers=vault_headers, timeout=15.0)
+        resp = await session.post('https://deposit.shopifycs.com/sessions', json=vault_json, headers=vault_headers, timeout=15.0)
         
         try:
             vault_resp = resp.json()
