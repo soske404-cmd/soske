@@ -307,14 +307,13 @@ async def autoshopify(url, card, session):
         addr = pick_addr(url, cc=currencyCode, rc=countryCode)
 
         # ============================================================
-        # STEP 5: Card Tokenization
+        # STEP 5: Card Tokenization (using deposit.shopifycs.com like original working terminal)
         # ============================================================
         token_headers = {
-            'authority': 'checkout.pci.shopifyinc.com',
             'accept': 'application/json',
             'accept-language': 'en-IN,en-GB;q=0.9,en-US;q=0.8,en;q=0.7',
             'content-type': 'application/json',
-            'origin': 'https://checkout.pci.shopifyinc.com',
+            'origin': 'https://deposit.shopifycs.com',
             'sec-ch-ua': '"Chromium";v="137", "Not/A)Brand";v="24"',
             'sec-ch-ua-mobile': mobile,
             'sec-ch-ua-platform': f'"{clienthint}"',
@@ -343,7 +342,7 @@ async def autoshopify(url, card, session):
 
         try:
             request = await session.post(
-                'https://checkout.pci.shopifyinc.com/sessions',
+                'https://deposit.shopifycs.com/sessions',
                 headers=token_headers,
                 json=token_payload,
                 timeout=20
