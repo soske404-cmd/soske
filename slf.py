@@ -22,11 +22,21 @@ async def check_card(user_id, cc, site=None):
     while retries < max_retries:
         try:
             # Create session with proxy if available
+            # httpx uses 'proxy' parameter (single proxy for all)
             if proxy:
-                async with httpx.AsyncClient(timeout=100.0, proxy=proxy) as session:
+                async with httpx.AsyncClient(
+                    timeout=60.0,
+                    proxy=proxy,
+                    verify=False,
+                    follow_redirects=True
+                ) as session:
                     result = await autoshopify(site, cc, session)
             else:
-                async with httpx.AsyncClient(timeout=100.0) as session:
+                async with httpx.AsyncClient(
+                    timeout=60.0,
+                    verify=False,
+                    follow_redirects=True
+                ) as session:
                     result = await autoshopify(site, cc, session)
             
             response_text = result.get("Response", "UNKNOWN")
@@ -35,7 +45,8 @@ async def check_card(user_id, cc, site=None):
             if any(x in response_text.upper() for x in [
                 "SERVER DISCONNECTED", 
                 "INCOMPLETE CHUNKED", 
-                "CONNECTION ERROR"
+                "CONNECTION ERROR",
+                "TIMEOUT"
             ]):
                 retries += 1
                 continue
@@ -48,8 +59,17 @@ async def check_card(user_id, cc, site=None):
             if retries >= max_retries:
                 return "Request Timeout"
             continue
+        
+        except httpx.ProxyError as e:
+            return f"Proxy Error: {str(e)[:50]}"
+        
+        except httpx.ConnectError as e:
+            retries += 1
+            if retries >= max_retries:
+                return f"Connect Error: {str(e)[:50]}"
+            continue
             
         except Exception as e:
-            return f"Error: {str(e)}"
+            return f"Error: {str(e)[:80]}"
     
-    return "Connection Failed"
+    return "Connection Failed - Check Proxy/Network"
