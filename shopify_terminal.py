@@ -845,10 +845,30 @@ class ShopifyChecker:
                 resp_json = await resp.json()
                 receipt_id = resp_json['data']['submitForCompletion']['receipt']['id']
                 print(f"[+] Receipt ID: {receipt_id}")
-            except:
+            except Exception as e:
+                print(f"[DEBUG] Submit response: {text[:2000]}")
+                
                 if 'CAPTCHA_METADATA_MISSING' in text:
                     return False, "Captcha required - Use better proxies", {}
                 
+                # Check for common errors in response
+                if 'CARD_DECLINED' in text:
+                    return False, "Card Declined", {'gateway': payment_name, 'amount': running_total}
+                if 'INSUFFICIENT_FUNDS' in text or 'insufficient' in text.lower():
+                    return True, "Insufficient Funds", {'gateway': payment_name, 'amount': running_total}
+                if 'INCORRECT_CVC' in text or 'INVALID_CVC' in text:
+                    return True, "Invalid CVV", {'gateway': payment_name, 'amount': running_total}
+                if 'EXPIRED_CARD' in text:
+                    return False, "Expired Card", {'gateway': payment_name, 'amount': running_total}
+                if 'FRAUD' in text:
+                    return False, "Fraud Suspected", {'gateway': payment_name, 'amount': running_total}
+                if 'DO_NOT_HONOR' in text:
+                    return False, "Do Not Honor", {'gateway': payment_name, 'amount': running_total}
+                if 'ActionRequiredReceipt' in text or '3DS' in text.upper():
+                    return True, "3D Secure Required", {'gateway': payment_name, 'amount': running_total}
+                if 'ProcessedReceipt' in text:
+                    return True, "Charged Successfully", {'gateway': payment_name, 'amount': running_total}
+                    
                 await asyncio.sleep(5)
                 resp = await self.session.post(graphql_url, json=completion_json, headers=headers)
                 text = await resp.text()
@@ -858,8 +878,10 @@ class ShopifyChecker:
                     receipt_id = resp_json['data']['submitForCompletion']['receipt']['id']
                 except:
                     if 'PAYMENTS_CREDIT_CARD_VERIFICATION_VALUE_INVALID_FOR_CARD_TYPE' in text:
-                        return False, "Invalid CVV", {}
-                    return False, "Error processing card", {}
+                        return False, "Invalid CVV", {'gateway': payment_name, 'amount': running_total}
+                    # Extract error code from response
+                    error_code = self.extract_between(text, '"code":"', '"') or "Unknown"
+                    return False, f"Declined - {error_code}", {'gateway': payment_name, 'amount': running_total}
             
             # STEP 4: POLL FOR RECEIPT
             print(f"[*] Polling for receipt...")
